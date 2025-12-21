@@ -3,7 +3,16 @@
 #include "info.hh"
 #include "writer.hh"
 
+#if OS_WINDOWS
+// Windows uses events instead of signals
+#define SIGUSR1 0  // Placeholder, not used on Windows
+inline int tgkill(pid_t /*tgid*/, pid_t /*tid*/, int /*sig*/) {
+	// On Windows, we signal the connection's event instead
+	return 0;
+}
+#else
 #include <signal.h>
+#endif
 
 bool CommandAllowed(TConnection *Connection, int Command){
 	if(Connection == NULL){

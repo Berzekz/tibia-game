@@ -4,7 +4,14 @@
 #include "threads.hh"
 #include "writer.hh"
 
-#include <sys/shm.h>
+#if OS_WINDOWS
+#	ifndef WIN32_LEAN_AND_MEAN
+#		define WIN32_LEAN_AND_MEAN
+#	endif
+#	include <windows.h>
+#elif OS_LINUX
+#	include <sys/shm.h>
+#endif
 
 // NOTE(fusion): This looks like an interface to external tools. Looking at the
 // `bin` directory this program was in, there are other programs that probably
@@ -30,6 +37,23 @@ struct TSharedMemory {
 static TSharedMemory *SHM = NULL;
 static bool IsGameServer = false;
 static bool VerboseOutput = false;
+
+#if OS_WINDOWS
+static HANDLE SHMHandle = NULL;
+static HANDLE GameThreadEvent = NULL;  // Event to signal game thread (replaces SIGUSR1)
+
+// Function to signal the game thread (called from communication threads)
+bool SignalGameThread(void) {
+	if (GameThreadEvent != NULL) {
+		return SetEvent(GameThreadEvent) != 0;
+	}
+	return false;
+}
+
+HANDLE GetGameThreadEvent(void) {
+	return GameThreadEvent;
+}
+#endif
 
 void StartGame(void){
 	if(SHM != NULL){
@@ -286,6 +310,102 @@ char *GetCommandBuffer(void){
 	return Buffer;
 }
 
+// =============================================================================
+// Platform-specific shared memory implementation
+// =============================================================================
+
+#if OS_WINDOWS
+
+static const char* SHM_NAME = "Local\\TibiaServer_SHM";
+
+static bool DeleteSHM(void){
+	// On Windows, shared memory is deleted when all handles are closed
+	return true;
+}
+
+static void CreateSHM(void){
+	SHMHandle = CreateFileMappingA(
+		INVALID_HANDLE_VALUE,
+		NULL,
+		PAGE_READWRITE,
+		0,
+		sizeof(TSharedMemory),
+		SHM_NAME
+	);
+
+	if(SHMHandle == NULL){
+		if(VerboseOutput){
+			printf("CreateSHM: Kann SharedMemory nicht anlegen (Fehler %d).\n", GetLastError());
+		}
+		throw "Cannot create SharedMemory";
+	}
+
+	// If it already existed, close and recreate
+	if(GetLastError() == ERROR_ALREADY_EXISTS){
+		CloseHandle(SHMHandle);
+		SHMHandle = NULL;
+
+		// Try to open and close the existing one
+		HANDLE existing = OpenFileMappingA(FILE_MAP_ALL_ACCESS, FALSE, SHM_NAME);
+		if(existing != NULL){
+			CloseHandle(existing);
+		}
+
+		// Now create again
+		SHMHandle = CreateFileMappingA(
+			INVALID_HANDLE_VALUE,
+			NULL,
+			PAGE_READWRITE,
+			0,
+			sizeof(TSharedMemory),
+			SHM_NAME
+		);
+
+		if(SHMHandle == NULL){
+			if(VerboseOutput){
+				printf("CreateSHM: Kann SharedMemory nicht anlegen (Fehler %d).\n", GetLastError());
+			}
+			throw "Cannot create SharedMemory";
+		}
+	}
+}
+
+static void AttachSHM(void){
+	if(SHMHandle == NULL){
+		SHMHandle = OpenFileMappingA(FILE_MAP_ALL_ACCESS, FALSE, SHM_NAME);
+		if(SHMHandle == NULL){
+			if(VerboseOutput){
+				printf("AttachSHM: Kann SharedMemory nicht fassen (Fehler %d).\n", GetLastError());
+			}
+			SHM = NULL;
+			throw "Cannot get SharedMemory";
+		}
+	}
+
+	SHM = (TSharedMemory*)MapViewOfFile(SHMHandle, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(TSharedMemory));
+	if(SHM == NULL){
+		if(VerboseOutput){
+			printf("AttachSHM: Kann SharedMemory nicht anbinden (Fehler %d).\n", GetLastError());
+		}
+		CloseHandle(SHMHandle);
+		SHMHandle = NULL;
+		throw "Cannot attach SharedMemory";
+	}
+}
+
+static void DetachSHM(void){
+	if(SHM != NULL){
+		UnmapViewOfFile(SHM);
+		SHM = NULL;
+	}
+	if(SHMHandle != NULL){
+		CloseHandle(SHMHandle);
+		SHMHandle = NULL;
+	}
+}
+
+#else // OS_LINUX
+
 static bool DeleteSHM(void){
 	int SHMID = shmget(SHMKey, 0, 0);
 	if(SHMID == -1){
@@ -360,6 +480,12 @@ static void DetachSHM(void){
 	}
 }
 
+#endif // OS_LINUX
+
+// =============================================================================
+// Public interface
+// =============================================================================
+
 void InitSHM(bool Verbose){
 	IsGameServer = true;
 	VerboseOutput = Verbose;
@@ -383,9 +509,24 @@ void InitSHM(bool Verbose){
 	SHM->GameState = GAME_STARTING;
 	SHM->GameProcessID = getpid();
 	SHM->GameThreadID = gettid();
+
+#if OS_WINDOWS
+	// Create event for game thread signaling
+	GameThreadEvent = CreateEventA(NULL, FALSE, FALSE, NULL);
+	if(GameThreadEvent == NULL){
+		error("InitSHM: Failed to create game thread event.\n");
+	}
+#endif
 }
 
 void ExitSHM(void){
+#if OS_WINDOWS
+	if(GameThreadEvent != NULL){
+		CloseHandle(GameThreadEvent);
+		GameThreadEvent = NULL;
+	}
+#endif
+
 	SetErrorFunction(NULL);
 	SetPrintFunction(NULL);
 	DetachSHM();

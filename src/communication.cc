@@ -7,12 +7,56 @@
 #include "threads.hh"
 #include "writer.hh"
 
-#include <arpa/inet.h>
-#include <fcntl.h>
-#include <netinet/in.h>
-#include <poll.h>
-#include <signal.h>
-#include <sys/socket.h>
+#if OS_WINDOWS
+#	ifndef WIN32_LEAN_AND_MEAN
+#		define WIN32_LEAN_AND_MEAN
+#	endif
+#	include <winsock2.h>
+#	include <ws2tcpip.h>
+#	pragma comment(lib, "ws2_32.lib")
+	typedef int socklen_t;
+	typedef SSIZE_T ssize_t;
+#	define close closesocket
+#	define read(s, buf, len) recv(s, (char*)(buf), len, 0)
+#	define write(s, buf, len) send(s, (const char*)(buf), len, 0)
+#	define poll WSAPoll
+#	ifdef POLLIN
+#		undef POLLIN
+#	endif
+#	define POLLIN POLLRDNORM
+	// tgkill is a Linux-specific syscall, emulate with OpenThread/GetExitCodeThread
+	inline int tgkill(pid_t /*tgid*/, pid_t tid, int /*sig*/) {
+		HANDLE hThread = OpenThread(THREAD_QUERY_INFORMATION, FALSE, tid);
+		if (hThread == NULL) {
+			return -1; // Thread doesn't exist
+		}
+		DWORD exitCode;
+		BOOL result = GetExitCodeThread(hThread, &exitCode);
+		CloseHandle(hThread);
+		if (!result || exitCode != STILL_ACTIVE) {
+			return -1; // Thread terminated
+		}
+		return 0; // Thread exists and is active
+	}
+	// Windows socket error codes mapped to errno-style names
+#	define PLATFORM_EAGAIN WSAEWOULDBLOCK
+#	define PLATFORM_EINTR WSAEINTR
+#	define PLATFORM_ECONNRESET WSAECONNRESET
+#	define PLATFORM_EPIPE WSAECONNABORTED
+#	define GET_SOCKET_ERROR() WSAGetLastError()
+#elif OS_LINUX
+#	include <arpa/inet.h>
+#	include <fcntl.h>
+#	include <netinet/in.h>
+#	include <poll.h>
+#	include <signal.h>
+#	include <sys/socket.h>
+#	define PLATFORM_EAGAIN EAGAIN
+#	define PLATFORM_EINTR EINTR
+#	define PLATFORM_ECONNRESET ECONNRESET
+#	define PLATFORM_EPIPE EPIPE
+#	define GET_SOCKET_ERROR() errno
+#endif
 
 // NOTE(fusion): We seem to add this value of 48 every time `NetLoad` is called,
 // and I assume it is to account for IPv4 (20 bytes) and TCP (20 bytes) headers
@@ -21,7 +65,13 @@
 #define PACKET_AVERAGE_SIZE_OVERHEAD 48
 
 #define MAX_COMMUNICATION_THREADS 1100
+// Windows needs larger stack size than Linux - 256KB should be safe
+#if OS_WINDOWS
+#define COMMUNICATION_THREAD_STACK_SIZE ((int)KB(256))
+#else
 #define COMMUNICATION_THREAD_STACK_SIZE ((int)KB(64))
+#endif
+
 
 #if TIBIA772
 static const int TERMINALVERSION[] = {772, 772, 772};
@@ -29,7 +79,11 @@ static const int TERMINALVERSION[] = {772, 772, 772};
 static const int TERMINALVERSION[] = {770, 770, 770};
 #endif
 
+#if OS_WINDOWS
+static SOCKET TCPSocket;
+#else
 static int TCPSocket;
+#endif
 static ThreadHandle AcceptorThread;
 static pid_t AcceptorThreadID;
 static int ActiveConnections;
@@ -274,7 +328,11 @@ bool WriteToSocket(TConnection *Connection, uint8 *Buffer, int Size, int MaxSize
 
 	int DataSize = Size - 4;
 	while((Size % 8) != 2 && Size < MaxSize){
+#if OS_WINDOWS
+		Buffer[Size] = (uint8)rand();
+#else
 		Buffer[Size] = rand_r(&Connection->RandomSeed);
+#endif
 		Size += 1;
 	}
 
@@ -302,22 +360,25 @@ bool WriteToSocket(TConnection *Connection, uint8 *Buffer, int Size, int MaxSize
 		}else if(BytesWritten == 0){
 			// TODO(fusion): Can this even happen without an error?
 			error("WriteToSocket: Fehler %d beim Senden an Socket %d.\n",
-					errno, Connection->GetSocket());
+					GET_SOCKET_ERROR(), Connection->GetSocket());
 			return false;
-		}else if(errno != EINTR){
-			if(errno != EAGAIN || Attempts <= 0){
-				if(errno == ECONNRESET || errno == EPIPE || errno == EAGAIN){
-					Log("game", "Verbindung an Socket %d zusammengebrochen.\n",
-							Connection->GetSocket());
-				}else{
-					error("WriteToSocket: Fehler %d beim Senden an Socket %d.\n",
-							errno, Connection->GetSocket());
+		}else{
+			int err = GET_SOCKET_ERROR();
+			if(err != PLATFORM_EINTR){
+				if(err != PLATFORM_EAGAIN || Attempts <= 0){
+					if(err == PLATFORM_ECONNRESET || err == PLATFORM_EPIPE || err == PLATFORM_EAGAIN){
+						Log("game", "Verbindung an Socket %d zusammengebrochen.\n",
+								Connection->GetSocket());
+					}else{
+						error("WriteToSocket: Fehler %d beim Senden an Socket %d.\n",
+								err, Connection->GetSocket());
+					}
+					return false;
 				}
-				return false;
-			}
 
-			DelayThread(0, 100000);
-			Attempts -= 1;
+				DelayThread(0, 100000);
+				Attempts -= 1;
+			}
 		}
 	}
 
@@ -415,7 +476,7 @@ bool GetWaitinglistEntry(const char *Name, uint32 *NextTry, bool *FreeAccount, b
 	CommunicationThreadMutex.down();
 	TWaitinglistEntry *Entry = WaitinglistHead;
 	while(Entry != NULL){
-		if(stricmp(Entry->Name, Name) == 0){
+		if(strnicmpn(Entry->Name, Name) == 0){
 			break;
 		}
 		Entry = Entry->Next;
@@ -437,7 +498,7 @@ void InsertWaitinglistEntry(const char *Name, uint32 NextTry, bool FreeAccount, 
 	TWaitinglistEntry *Prev = NULL;
 	TWaitinglistEntry *Entry = WaitinglistHead;
 	while(Entry != NULL){
-		if(stricmp(Entry->Name, Name) == 0){
+		if(strnicmpn(Entry->Name, Name) == 0){
 			break;
 		}
 		Prev = Entry;
@@ -475,7 +536,7 @@ void DeleteWaitinglistEntry(const char *Name){
 	TWaitinglistEntry *Prev = NULL;
 	TWaitinglistEntry *Entry = WaitinglistHead;
 	while(Entry != NULL){
-		if(stricmp(Entry->Name, Name) == 0){
+		if(strnicmpn(Entry->Name, Name) == 0){
 			break;
 		}
 		Prev = Entry;
@@ -511,7 +572,7 @@ int GetWaitinglistPosition(const char *Name, bool FreeAccount, bool Newbie){
 	// the end of the queue.
 	TWaitinglistEntry *Entry = WaitinglistHead;
 	while(Entry != NULL){
-		if(stricmp(Entry->Name, Name) == 0){
+		if(strnicmpn(Entry->Name, Name) == 0){
 			break;
 		}
 
@@ -621,19 +682,26 @@ int ReadFromSocket(TConnection *Connection, uint8 *Buffer, int Size){
 	int BytesToRead = Size;
 	uint8 *ReadPtr = Buffer;
 	while(BytesToRead > 0){
+#if OS_WINDOWS
+		int BytesRead = recv(Connection->GetSocket(), (char*)ReadPtr, BytesToRead, 0);
+#else
 		int BytesRead = (int)read(Connection->GetSocket(), ReadPtr, BytesToRead);
+#endif
 		if(BytesRead > 0){
 			BytesToRead -= BytesRead;
 			ReadPtr += BytesRead;
 		}else if(BytesRead == 0){
 			// NOTE(fusion): TCP FIN with no more data to read.
 			break;
-		}else if(errno != EINTR){
-			if(errno != EAGAIN || BytesToRead == Size || Attempts <= 0){
-				return -1;
+		}else{
+			int err = GET_SOCKET_ERROR();
+			if(err != PLATFORM_EINTR){
+				if(err != PLATFORM_EAGAIN || BytesToRead == Size || Attempts <= 0){
+					return -1;
+				}
+				DelayThread(0, 100000);
+				Attempts -= 1;
 			}
-			DelayThread(0, 100000);
-			Attempts -= 1;
 		}
 	}
 	return Size - BytesToRead;
@@ -656,6 +724,15 @@ bool DrainSocket(TConnection *Connection, int Size){
 bool CallGameThread(TConnection *Connection){
 	if(GameRunning()){
 		Connection->WaitingForACK = true;
+#if OS_WINDOWS
+		// On Windows, we use SetEvent to signal the game thread
+		if(!SignalGameThread()){
+			error("CallGameThread: Can't signal game thread\n");
+			SendLoginMessage(Connection, LOGIN_MESSAGE_ERROR,
+					"The server is not online.\nPlease try again later.", -1);
+			return false;
+		}
+#else
 		if(tgkill(GetGameProcessID(), GetGameThreadID(), SIGUSR1) == -1){
 			error("CallGameThread: Can't send SIGUSR1 to thread %d/%d: (%d) %s\n",
 					GetGameProcessID(), GetGameThreadID(), errno, strerrordesc_np(errno));
@@ -663,6 +740,7 @@ bool CallGameThread(TConnection *Connection){
 					"The server is not online.\nPlease try again later.", -1);
 			return false;
 		}
+#endif
 	}
 	return true;
 }
@@ -1254,6 +1332,182 @@ void DecrementActiveConnections(void){
 	CommunicationThreadMutex.up();
 }
 
+#if OS_WINDOWS
+
+// Windows version using WSAEventSelect and WaitForMultipleObjects
+void CommunicationThread(SOCKET Socket){
+	TConnection *Connection = AssignFreeConnection();
+	if(Connection == NULL){
+		print(2, "Keine Verbindung mehr frei.\n");
+		if(closesocket(Socket) == SOCKET_ERROR){
+			error("CommunicationThread: Fehler %d beim Schließen der Socket (1).\n", WSAGetLastError());
+		}
+		return;
+	}
+
+	ASSERT(Connection->ThreadID == gettid());
+	Connection->Connect(Socket);
+	Connection->WaitingForACK = false;
+
+	// Set socket to non-blocking mode
+	u_long nonBlocking = 1;
+	if(ioctlsocket(Socket, FIONBIO, &nonBlocking) == SOCKET_ERROR){
+		error("CommunicationThread: ioctlsocket fehlgeschlagen für Socket %llu (error %d).\n",
+			(unsigned long long)Socket, WSAGetLastError());
+		if(closesocket(Socket) == SOCKET_ERROR){
+			error("CommunicationThread: Fehler %d beim Schließen der Socket (2).\n", WSAGetLastError());
+		}
+		Connection->Free();
+		return;
+	}
+
+	// Create event for socket and thread signaling
+	HANDLE SocketEvent = WSACreateEvent();
+	if(SocketEvent == WSA_INVALID_EVENT){
+		error("CommunicationThread: WSACreateEvent fehlgeschlagen.\n");
+		closesocket(Socket);
+		Connection->Free();
+		return;
+	}
+
+	// Create events for thread communication
+	HANDLE ThreadEvents[4];
+	ThreadEvents[0] = SocketEvent;
+	ThreadEvents[1] = CreateEvent(NULL, FALSE, FALSE, NULL); // HUP/Close
+	ThreadEvents[2] = CreateEvent(NULL, FALSE, FALSE, NULL); // Send data
+	ThreadEvents[3] = CreateEvent(NULL, FALSE, FALSE, NULL); // Login timeout
+
+	if(!ThreadEvents[1] || !ThreadEvents[2] || !ThreadEvents[3]){
+		error("CommunicationThread: CreateEvent fehlgeschlagen.\n");
+		WSACloseEvent(SocketEvent);
+		closesocket(Socket);
+		Connection->Free();
+		return;
+	}
+
+	// Store event handles in connection for external signaling
+	Connection->CloseEvent = ThreadEvents[1];
+	Connection->SendEvent = ThreadEvents[2];
+	Connection->TimerEvent = ThreadEvents[3];
+
+	// Associate socket events with the event object
+	if(WSAEventSelect(Socket, SocketEvent, FD_READ | FD_CLOSE) == SOCKET_ERROR){
+		error("CommunicationThread: WSAEventSelect fehlgeschlagen.\n");
+		for(int i = 1; i < 4; i++) CloseHandle(ThreadEvents[i]);
+		WSACloseEvent(SocketEvent);
+		closesocket(Socket);
+		Connection->Free();
+		return;
+	}
+
+	// Set login timer using Windows timer
+	if(!Connection->SetLoginTimer(5)){
+		error("CommunicationThread: Failed to set login timer.\n");
+		for(int i = 1; i < 4; i++) CloseHandle(ThreadEvents[i]);
+		WSACloseEvent(SocketEvent);
+		closesocket(Socket);
+		Connection->Free();
+		return;
+	}
+
+	if(!ReceiveCommand(Connection)){
+		Connection->Close(true);
+	}
+
+	Connection->SigIOPending = false;
+	while(GameRunning() && Connection->ConnectionIsOk){
+		DWORD WaitResult = WaitForMultipleObjects(4, ThreadEvents, FALSE, 1000);
+
+		switch(WaitResult){
+			case WAIT_OBJECT_0: { // Socket event
+				WSANETWORKEVENTS networkEvents;
+				if(WSAEnumNetworkEvents(Socket, SocketEvent, &networkEvents) == 0){
+					if(networkEvents.lNetworkEvents & FD_CLOSE){
+						Connection->Close(false);
+					}else if(networkEvents.lNetworkEvents & FD_READ){
+						if(!Connection->WaitingForACK){
+							Connection->SigIOPending = false;
+							if(!ReceiveCommand(Connection)){
+								Connection->Close(true);
+							}
+						}else{
+							Connection->SigIOPending = true;
+						}
+					}
+				}
+				break;
+			}
+
+			case WAIT_OBJECT_0 + 1: { // Close event (HUP equivalent)
+				Connection->Close(false);
+				break;
+			}
+
+			case WAIT_OBJECT_0 + 2: { // Send data event (SIGUSR2 equivalent)
+				if(!SendData(Connection)){
+					Connection->Close(false);
+				}
+				// Also check for pending IO
+				if(Connection->SigIOPending && !Connection->WaitingForACK){
+					Connection->SigIOPending = false;
+					if(!ReceiveCommand(Connection)){
+						Connection->Close(true);
+					}
+				}
+				break;
+			}
+
+			case WAIT_OBJECT_0 + 3: { // Timer event (SIGALRM equivalent)
+				Connection->StopLoginTimer();
+				if(Connection->State == CONNECTION_CONNECTED){
+					print(2, "Login-TimeOut für Socket %d.\n", Socket);
+					Connection->Close(false);
+				}
+				break;
+			}
+
+			case WAIT_TIMEOUT: {
+				// Periodic check, also process pending IO
+				if(Connection->SigIOPending && !Connection->WaitingForACK){
+					Connection->SigIOPending = false;
+					if(!ReceiveCommand(Connection)){
+						Connection->Close(true);
+					}
+				}
+				break;
+			}
+
+			default:{
+				break;
+			}
+		}
+	}
+
+	while(Connection->Live()){
+		DelayThread(1, 0);
+	}
+
+	// Wait for queued data to be sent
+	if(Connection->ClosingIsDelayed){
+		DelayThread(2, 0);
+	}
+
+	// Cleanup
+	for(int i = 1; i < 4; i++) CloseHandle(ThreadEvents[i]);
+	WSACloseEvent(SocketEvent);
+	Connection->CloseEvent = NULL;
+	Connection->SendEvent = NULL;
+	Connection->TimerEvent = NULL;
+
+	if(closesocket(Socket) == SOCKET_ERROR){
+		error("CommunicationThread: Fehler %d beim Schließen der Socket (4).\n", WSAGetLastError());
+	}
+
+	Connection->Free();
+}
+
+#else // OS_LINUX
+
 void CommunicationThread(int Socket){
 	TConnection *Connection = AssignFreeConnection();
 	if(Connection == NULL){
@@ -1372,7 +1626,43 @@ void CommunicationThread(int Socket){
 	Connection->Free();
 }
 
+#endif // OS_LINUX
+
 int HandleConnection(void *Data){
+#if OS_WINDOWS
+	// Socket passed directly as void* - valid across threads per Microsoft docs
+	SOCKET Socket = (SOCKET)(uintptr_t)Data;
+
+	if(Socket == INVALID_SOCKET){
+		DecrementActiveConnections();
+		return 0;
+	}
+
+	// Check socket state - the client may have disconnected during thread startup
+	struct sockaddr_in testAddr;
+	socklen_t testLen = sizeof(testAddr);
+	int gpResult = getpeername(Socket, (struct sockaddr*)&testAddr, &testLen);
+	if(gpResult == SOCKET_ERROR){
+		closesocket(Socket);
+		DecrementActiveConnections();
+		return 0;
+	}
+
+	try{
+		CommunicationThread(Socket);
+	}catch(RESULT r){
+		error("HandleConnection: Nicht abgefangene Exception %d.\n", r);
+	}catch(const char *str){
+		error("HandleConnection: Nicht abgefangene Exception \"%s\".\n", str);
+	}catch(const std::exception &e){
+		error("HandleConnection: Nicht abgefangene Exception %s.\n", e.what());
+	}catch(...){
+		error("HandleConnection: Nicht abgefangene Exception unbekannten Typs.\n");
+	}
+
+	DecrementActiveConnections();
+	return 0;
+#else
 	int Socket		= (uint16)((uintptr)Data);
 	int StackNumber	= (uint16)((uintptr)Data >> 16);
 
@@ -1399,6 +1689,7 @@ int HandleConnection(void *Data){
 	}
 
 	return 0;
+#endif
 }
 
 // Acceptor Thread
@@ -1406,23 +1697,51 @@ int HandleConnection(void *Data){
 bool OpenSocket(void){
 	print(1, "Starte Game-Server...\n");
 	print(1, "Pid=%d, Tid=%d - horche an Port %d\n", getpid(), gettid(), GamePort);
+
+#if OS_WINDOWS
+	// Initialize Winsock
+	WSADATA wsaData;
+	int wsaResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
+	if(wsaResult != 0){
+		error("LaunchServer: WSAStartup failed: %d\n", wsaResult);
+		return false;
+	}
+#endif
+
 	TCPSocket = socket(AF_INET, SOCK_STREAM, 0);
+#if OS_WINDOWS
+	if(TCPSocket == INVALID_SOCKET){
+		error("LaunchServer: Kann Socket nicht öffnen.\n");
+		WSACleanup();
+		return false;
+	}
+#else
 	if(TCPSocket == -1){
 		error("LaunchServer: Kann Socket nicht öffnen.\n");
 		return false;
 	}
+#endif
 
 	struct linger Linger = {};
 	Linger.l_onoff = 0;
 	Linger.l_linger = 0;
+#if OS_WINDOWS
+	if(setsockopt(TCPSocket, SOL_SOCKET, SO_LINGER, (const char*)&Linger, sizeof(Linger)) == SOCKET_ERROR){
+#else
 	if(setsockopt(TCPSocket, SOL_SOCKET, SO_LINGER, &Linger, sizeof(Linger)) == -1){
+#endif
 		error("LaunchServer: Socket wurde nicht auf LINGER=0 gesetzt.\n");
 		return false;
 	}
 
 	int ReuseAddr = 1;
+#if OS_WINDOWS
+	if(setsockopt(TCPSocket, SOL_SOCKET, SO_REUSEADDR, (const char*)&ReuseAddr, sizeof(ReuseAddr)) == SOCKET_ERROR){
+		error("LaunchServer: Fehler %d bei setsockopt.\n", WSAGetLastError());
+#else
 	if(setsockopt(TCPSocket, SOL_SOCKET, SO_REUSEADDR, &ReuseAddr, sizeof(ReuseAddr)) == -1){
 		error("LaunchServer: Fehler %d bei setsockopt.\n", errno);
+#endif
 		return false;
 	}
 
@@ -1430,6 +1749,20 @@ bool OpenSocket(void){
 	ServerAddress.sin_family = AF_INET;
 	ServerAddress.sin_port = htons(GamePort);
 	ServerAddress.sin_addr.s_addr = inet_addr(GameAddress);
+#if OS_WINDOWS
+	if(bind(TCPSocket, (struct sockaddr*)&ServerAddress, sizeof(ServerAddress)) == SOCKET_ERROR){
+		error("LaunchServer: Fehler %d bei bind.\n", WSAGetLastError());
+		print(1, "Bind Error Again -> Begin FloodBind :(\n");
+		while(bind(TCPSocket, (struct sockaddr*)&ServerAddress, sizeof(ServerAddress)) == SOCKET_ERROR){
+			DelayThread(1, 0);
+		}
+	}
+
+	if(listen(TCPSocket, 512) == SOCKET_ERROR){
+		error("LaunchServer: Fehler %d bei listen.\n", WSAGetLastError());
+		return false;
+	}
+#else
 	if(bind(TCPSocket, (struct sockaddr*)&ServerAddress, sizeof(ServerAddress)) == -1){
 		error("LaunchServer: Fehler %d bei bind.\n", errno);
 		print(1, "Bind Error Again -> Begin FloodBind :(\n");
@@ -1442,6 +1775,7 @@ bool OpenSocket(void){
 		error("LaunchServer: Fehler %d bei listen.\n", errno);
 		return false;
 	}
+#endif
 
 	return true;
 }
@@ -1450,14 +1784,76 @@ int AcceptorThreadLoop(void *Unused){
 	AcceptorThreadID = gettid();
 	print(1, "Warte auf Clients...\n");
 	while(GameRunning()){
+#if OS_WINDOWS
+		SOCKET Socket = accept(TCPSocket, NULL, NULL);
+		if(Socket == INVALID_SOCKET){
+			int err = WSAGetLastError();
+			if(err != WSAEINTR && err != WSAECONNRESET){
+				error("AcceptorThreadLoop: Fehler %d beim Accept.\n", err);
+			}
+			continue;
+		}
+
+#else
 		int Socket = accept(TCPSocket, NULL, NULL);
 		if(Socket == -1){
 			error("AcceptorThreadLoop: Fehler %d beim Accept.\n", errno);
 			continue;
 		}
+#endif
 
 		// TODO(fusion): I don't think anything in here can throw any exception.
 		try{
+#if OS_WINDOWS
+			// According to Microsoft docs, sockets ARE valid across threads in the same process
+			// https://learn.microsoft.com/en-us/windows/win32/winsock/shared-sockets-2
+			// "Sockets can be shared among threads in a given process without using
+			// the WSADuplicateSocket function because a socket descriptor is valid
+			// in all threads of a process."
+			if(ActiveConnections >= MAX_COMMUNICATION_THREADS){
+				print(3,"Keine Verbindung mehr frei.\n");
+				closesocket(Socket);
+			}else{
+				IncrementActiveConnections();
+
+				// Use _beginthreadex instead of CreateThread for proper CRT initialization
+				uintptr_t hThread = _beginthreadex(
+					NULL,                           // security
+					COMMUNICATION_THREAD_STACK_SIZE, // stack size
+					[](void* param) -> unsigned {
+						SOCKET sock = (SOCKET)(uintptr_t)param;
+
+						// Verify socket immediately
+						struct sockaddr_in testAddr;
+						int testLen = sizeof(testAddr);
+						if(getpeername(sock, (struct sockaddr*)&testAddr, &testLen) == SOCKET_ERROR){
+							closesocket(sock);
+							DecrementActiveConnections();
+							return 0;
+						}
+
+						try{
+							CommunicationThread(sock);
+						}catch(...){
+							error("HandleConnection: Nicht abgefangene Exception.\n");
+						}
+						DecrementActiveConnections();
+						return 0;
+					},
+					(void*)(uintptr_t)Socket,       // argument
+					0,                              // initflag (start immediately)
+					NULL                            // thread id
+				);
+
+				if(hThread == 0){
+					error("AcceptorThreadLoop: _beginthreadex failed, errno=%d\n", errno);
+					DecrementActiveConnections();
+					closesocket(Socket);
+				}else{
+					CloseHandle((HANDLE)hThread); // Detach the thread
+				}
+			}
+#else
 			if(UseOwnStacks){
 				int StackNumber;
 				void *Stack;
@@ -1501,6 +1897,7 @@ int AcceptorThreadLoop(void *Unused){
 					}
 				}
 			}
+#endif
 		}catch(RESULT r){
 			error("AcceptorThreadLoop: Nicht abgefangene Exception %d.\n", r);
 		}catch(const char *str){
@@ -1524,6 +1921,11 @@ int AcceptorThreadLoop(void *Unused){
 // Initialization
 // =============================================================================
 void CheckThreadlibVersion(void){
+#if OS_WINDOWS
+	// Windows doesn't use custom stacks
+	UseOwnStacks = false;
+	print(2, "Verwende verkleinerte Bibliotheks-Stacks.\n");
+#else
 	// TODO(fusion): We'll probably remove `OwnStacks` support anyway but it
 	// seems to be using this file `/etc/image-release` as an heuristic to
 	// enable it. Not sure what this file is about.
@@ -1533,6 +1935,7 @@ void CheckThreadlibVersion(void){
 	}else{
 		print(2, "Verwende verkleinerte Bibliotheks-Stacks.\n");
 	}
+#endif
 }
 
 void InitCommunication(void){
@@ -1541,7 +1944,11 @@ void InitCommunication(void){
 	InitLoadHistory();
 
 	WaitinglistHead = NULL;
+#if OS_WINDOWS
+	TCPSocket = INVALID_SOCKET;
+#else
 	TCPSocket = -1;
+#endif
 	AcceptorThread = INVALID_THREAD_HANDLE;
 	AcceptorThreadID = 0;
 	ActiveConnections = 0;
@@ -1553,7 +1960,11 @@ void InitCommunication(void){
 	}
 
 	OpenSocket();
+#if OS_WINDOWS
+	if(TCPSocket == INVALID_SOCKET){
+#else
 	if(TCPSocket == -1){
+#endif
 		throw "cannot open socket";
 	}
 
@@ -1564,32 +1975,53 @@ void InitCommunication(void){
 }
 
 void ExitCommunication(void){
-	// NOTE(fusion): `SIGHUP` is used to signal the connection thread to close
-	// the connection and terminate.
+	// Signal all connection threads to close
 	print(3, "Beende alle Verbindungen...\n");
 	TConnection *Connection = GetFirstConnection();
 	while(Connection != NULL){
+#if OS_WINDOWS
+		// On Windows, signal the close event
+		if(Connection->CloseEvent != NULL){
+			SetEvent(Connection->CloseEvent);
+		}
+#else
 		tgkill(GetGameProcessID(), Connection->GetThreadID(), SIGHUP);
+#endif
 		Connection = GetNextConnection();
 	}
 
 	ProcessConnections();
 	print(3, "Alle Verbindungen beendet.\n");
 
+#if OS_WINDOWS
+	if(TCPSocket != INVALID_SOCKET){
+		if(closesocket(TCPSocket) == SOCKET_ERROR){
+			error("ExitCommunication: Fehler %d beim Schließen der Socket.\n", WSAGetLastError());
+		}
+		TCPSocket = INVALID_SOCKET;
+	}
+#else
 	if(TCPSocket != -1){
 		if(close(TCPSocket) == -1){
 			error("ExitCommunication: Fehler %d beim Schließen der Socket.\n", errno);
 		}
 		TCPSocket = -1;
 	}
+#endif
 
 	if(AcceptorThread != INVALID_THREAD_HANDLE){
+#if OS_LINUX
 		if(AcceptorThreadID != 0){
 			tgkill(GetGameProcessID(), AcceptorThreadID, SIGHUP);
 		}
+#endif
 		JoinThread(AcceptorThread);
 		AcceptorThread = INVALID_THREAD_HANDLE;
 	}
+
+#if OS_WINDOWS
+	WSACleanup();
+#endif
 
 	QueryManagerConnectionPool.exit();
 	ExitLoadHistory();

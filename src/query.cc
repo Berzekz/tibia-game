@@ -1,11 +1,30 @@
 #include "query.hh"
 #include "config.hh"
 
-#include <arpa/inet.h>
-#include <netdb.h>
-#include <netinet/in.h>
-#include <poll.h>
-#include <sys/socket.h>
+#if OS_WINDOWS
+#	ifndef WIN32_LEAN_AND_MEAN
+#		define WIN32_LEAN_AND_MEAN
+#	endif
+#	include <winsock2.h>
+#	include <ws2tcpip.h>
+#	pragma comment(lib, "ws2_32.lib")
+	typedef int socklen_t;
+	typedef SSIZE_T ssize_t;
+#	define close closesocket
+#	define socket_read(s, buf, len) recv(s, (char*)(buf), len, 0)
+#	define socket_write(s, buf, len) send(s, (const char*)(buf), len, 0)
+#	define poll WSAPoll
+	typedef ULONG in_addr_t;
+#elif OS_LINUX
+#	include <arpa/inet.h>
+#	include <netdb.h>
+#	include <netinet/in.h>
+#	include <poll.h>
+#	include <sys/socket.h>
+#	include <unistd.h>
+#	define socket_read(s, buf, len) ::read(s, buf, len)
+#	define socket_write(s, buf, len) ::write(s, buf, len)
+#endif
 
 static int ApplicationType;
 static char LoginData[30];
@@ -42,24 +61,25 @@ TQueryManagerConnection::~TQueryManagerConnection(void){
 }
 
 bool ResolveHostNameAddress(const char *HostName, in_addr_t *OutAddr){
-	// TODO(fusion): Just use `getaddrinfo`?
-	int ErrorCode;
-	hostent HostEnt;
-	hostent *HostEntResult;
-	char Buffer[2048];
-	int Ret = gethostbyname_r(HostName, &HostEnt,
-			Buffer, sizeof(Buffer), &HostEntResult, &ErrorCode);
-	if(Ret != 0 || HostEntResult == NULL){
+	// Use getaddrinfo which is cross-platform
+	struct addrinfo hints = {};
+	struct addrinfo *result = NULL;
+
+	hints.ai_family = AF_INET;
+	hints.ai_socktype = SOCK_STREAM;
+
+	int ret = getaddrinfo(HostName, NULL, &hints, &result);
+	if(ret != 0 || result == NULL){
 		return false;
 	}
 
-	if(OutAddr){
-		*OutAddr = ((in_addr_t)HostEntResult->h_addr_list[0][0] << 24)
-				| ((in_addr_t)HostEntResult->h_addr_list[0][1] << 16)
-				| ((in_addr_t)HostEntResult->h_addr_list[0][2] <<  8)
-				| ((in_addr_t)HostEntResult->h_addr_list[0][3] <<  0);
+	if(OutAddr && result->ai_family == AF_INET){
+		struct sockaddr_in *addr = (struct sockaddr_in*)result->ai_addr;
+		// Keep in network byte order as that's what sockaddr_in expects
+		*OutAddr = addr->sin_addr.s_addr;
 	}
 
+	freeaddrinfo(result);
 	return true;
 }
 
@@ -111,7 +131,11 @@ void TQueryManagerConnection::connect(void){
 void TQueryManagerConnection::disconnect(void){
 	if(this->Socket != -1){
 		if(close(this->Socket) == -1){
+#if OS_WINDOWS
+			error("TQueryManagerConnection::disconnect: Fehler %d beim Schließen der Socket.\n", WSAGetLastError());
+#else
 			error("TQueryManagerConnection::disconnect: Fehler %d beim Schließen der Socket.\n", errno);
+#endif
 		}
 		this->Socket = -1;
 	}
@@ -122,7 +146,7 @@ int TQueryManagerConnection::write(const uint8 *Buffer, int Size){
 	int BytesToWrite = Size;
 	const uint8 *WritePtr = Buffer;
 	while(BytesToWrite > 0){
-		int BytesWritten = (int)::write(this->Socket, WritePtr, BytesToWrite);
+		int BytesWritten = (int)socket_write(this->Socket, WritePtr, BytesToWrite);
 		if(BytesWritten > 0){
 			BytesToWrite -= BytesWritten;
 			WritePtr += BytesWritten;
@@ -154,7 +178,7 @@ int TQueryManagerConnection::read(uint8 *Buffer, int Size, int Timeout){
 			return -2;
 		}
 
-		int BytesRead = ::read(this->Socket, ReadPtr, BytesToRead);
+		int BytesRead = socket_read(this->Socket, ReadPtr, BytesToRead);
 		if(BytesRead > 0){
 			BytesToRead -= BytesRead;
 			ReadPtr += BytesRead;

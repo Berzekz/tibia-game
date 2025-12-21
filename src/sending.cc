@@ -6,7 +6,17 @@
 #include "map.hh"
 #include "writer.hh"
 
+#if OS_WINDOWS
+#	ifndef WIN32_LEAN_AND_MEAN
+#		define WIN32_LEAN_AND_MEAN
+#	endif
+#	include <windows.h>
+// Windows uses events instead of signals
+// SignalGameThread is defined in shm.cc
+extern bool SignalGameThread(void);
+#else
 #include <signal.h>
+#endif
 
 #define MAX_OBJECTS_PER_POINT		10
 #define MAX_OBJECTS_PER_CONTAINER	36
@@ -23,7 +33,14 @@ void SendAll(void){
 			// NOTE(fusion): `SIGUSR2` is used to signal the connection thread
 			// that there is pending data in the connection's output buffer.
 			if(Connection->Live() && Connection->NextToCommit > Connection->NextToSend){
+#if OS_WINDOWS
+				// On Windows, signal the connection's SendEvent instead of using signals
+				if(Connection->SendEvent != NULL){
+					SetEvent(Connection->SendEvent);
+				}
+#else
 				tgkill(GetGameProcessID(), Connection->GetThreadID(), SIGUSR2);
+#endif
 			}
 		}else{
 			error("SendAll: Verbindung ist nicht sendewillig.\n");

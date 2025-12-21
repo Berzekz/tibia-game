@@ -54,7 +54,11 @@ bool ReceiveCommand(TConnection *Connection);
 
 void IncrementActiveConnections(void);
 void DecrementActiveConnections(void);
+#if OS_WINDOWS
+void CommunicationThread(SOCKET Socket);
+#else
 void CommunicationThread(int Socket);
+#endif
 int HandleConnection(void *Data);
 bool OpenSocket(void);
 int AcceptorThreadLoop(void *Unused);

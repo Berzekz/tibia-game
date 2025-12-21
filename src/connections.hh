@@ -2,6 +2,13 @@
 #define TIBIA_CONNECTIONS_HH_ 1
 
 #include "common.hh"
+
+#if OS_WINDOWS
+#	ifndef WIN32_LEAN_AND_MEAN
+#		define WIN32_LEAN_AND_MEAN
+#	endif
+#	include <winsock2.h>
+#endif
 #include "crypto.hh"
 #include "enums.hh"
 #include "map.hh"
@@ -161,7 +168,11 @@ struct TConnection {
 	const char *GetIPAddress(void);
 	void Free(void);
 	void Assign(void);
+#if OS_WINDOWS
+	void Connect(SOCKET Socket);
+#else
 	void Connect(int Socket);
+#endif
 	void Login(void);
 	bool JoinGame(TReadBuffer *Buffer);
 	void EnterGame(void);
@@ -206,8 +217,16 @@ struct TConnection {
 	uint32 RandomSeed;
 	CONNECTIONSTATE State;
 	pid_t ThreadID;
+#if OS_WINDOWS
+	HANDLE LoginTimerHandle;
+	HANDLE CloseEvent;
+	HANDLE SendEvent;
+	HANDLE TimerEvent;
+	SOCKET Socket;
+#else
 	timer_t LoginTimer;
 	int Socket;
+#endif
 	char IPAddress[16];
 	TXTEASymmetricKey SymmetricKey;
 	bool ConnectionIsOk;

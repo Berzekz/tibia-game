@@ -3,6 +3,16 @@
 
 #include "common.hh"
 
+// Windows defines ERROR and NOERROR as macros, undefine them for our enum
+#if OS_WINDOWS
+#ifdef ERROR
+#undef ERROR
+#endif
+#ifdef NOERROR
+#undef NOERROR
+#endif
+#endif
+
 // TODO(fusion): Probably cleanup these names? Prefix values? Its crazy that
 // there are no collision problems (possibly yet).
 

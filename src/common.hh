@@ -72,18 +72,36 @@ typedef size_t usize;
 #	define ASSERT(expr) ((void)(expr))
 #endif
 
-// NOTE(fusion): The server will only compile on Linux due to a few Linux specific
-// features being used. Making it compile on Windows shouldn't be too difficult but
-// would require a few design changes.
-STATIC_ASSERT(OS_LINUX);
-#include <errno.h>
-#include <unistd.h>
-
-// NOTE(fusion): This is the member name for the thread id in `struct sigevent`
-// when `sigev_notify` is `SIGEV_THREAD_ID` but for whatever reason glibc doesn't
-// define it.
-#ifndef sigev_notify_thread_id
-#	define sigev_notify_thread_id _sigev_un._tid
+// Cross-platform support
+#if OS_WINDOWS
+#	ifndef WIN32_LEAN_AND_MEAN
+#		define WIN32_LEAN_AND_MEAN
+#	endif
+#	ifndef NOMINMAX
+#		define NOMINMAX
+#	endif
+#	include <windows.h>
+#	include <io.h>
+#	include <direct.h>
+#	include <process.h>  // Include before our getpid to avoid conflicts
+	// Windows compatibility typedefs
+	typedef DWORD pid_t;
+	// Note: getpid() from process.h returns int, we use GetCurrentProcessId for consistency
+	inline pid_t gettid(void) { return (pid_t)GetCurrentThreadId(); }
+#elif OS_LINUX
+#	include <errno.h>
+#	include <unistd.h>
+#	include <sys/syscall.h>
+	// NOTE(fusion): gettid() is not always available as a wrapper
+#	ifndef gettid
+		inline pid_t gettid(void) { return (pid_t)syscall(SYS_gettid); }
+#	endif
+	// NOTE(fusion): This is the member name for the thread id in `struct sigevent`
+	// when `sigev_notify` is `SIGEV_THREAD_ID` but for whatever reason glibc doesn't
+	// define it.
+#	ifndef sigev_notify_thread_id
+#		define sigev_notify_thread_id _sigev_un._tid
+#	endif
 #endif
 
 // Constants
@@ -115,6 +133,10 @@ bool GameStarting(void);
 bool GameEnding(void);
 pid_t GetGameProcessID(void);
 pid_t GetGameThreadID(void);
+#if OS_WINDOWS
+bool SignalGameThread(void);
+HANDLE GetGameThreadEvent(void);
+#endif
 int GetPrintlogPosition(void);
 char *GetPrintlogLine(int Line);
 void IncrementObjectCounter(void);
@@ -191,7 +213,7 @@ int toLower(int c);
 int toUpper(int c);
 char *strLower(char *s);
 char *strUpper(char *s);
-int stricmp(const char *s1, const char *s2, int Max = INT_MAX);
+int strnicmpn(const char *s1, const char *s2, int Max = INT_MAX);
 char *findFirst(char *s, char c);
 char *findLast(char *s, char c);
 

@@ -6,7 +6,7 @@
 #include "operate.hh"
 #include "writer.hh"
 
-#include <dirent.h>
+#include "compat.hh"
 
 TRaceData RaceData[MAX_RACES];
 priority_queue<uint32, uint32> ToDoQueue(5000, 1000);
@@ -1237,7 +1237,7 @@ bool IsRaceValid(int Race){
 int GetRaceByName(const char *RaceName){
 	int Result = 0;
 	for(int Race = 1; Race < MAX_RACES; Race += 1){
-		if(stricmp(RaceName, RaceData[Race].Name) == 0){
+		if(strnicmpn(RaceName, RaceData[Race].Name) == 0){
 			Result = Race;
 			break;
 		}

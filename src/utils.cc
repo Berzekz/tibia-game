@@ -163,7 +163,7 @@ char *strUpper(char *s){
 	return s;
 }
 
-int stricmp(const char *s1, const char *s2, int Max /*= INT_MAX*/){
+int strnicmpn(const char *s1, const char *s2, int Max /*= INT_MAX*/){
 	for(int i = 0; i < Max; i += 1){
 		int c1 = toLower(s1[i]);
 		int c2 = toLower(s2[i]);

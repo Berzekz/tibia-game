@@ -1383,7 +1383,7 @@ void TPlayer::Regenerate(void){
 	}
 
 	uint32 Text = Bed.getAttribute(TEXTSTRING);
-	if(Text == 0 || stricmp(GetDynamicString(Text), this->Name) != 0){
+	if(Text == 0 || strnicmpn(GetDynamicString(Text), this->Name) != 0){
 		return;
 	}
 
@@ -1798,7 +1798,7 @@ TPlayer *GetPlayer(const char *Name){
 	TPlayer *Result = NULL;
 	for(int Index = 0; Index < FirstFreePlayer; Index += 1){
 		TPlayer *Player = *PlayerList.at(Index);
-		if(stricmp(Player->Name, Name) == 0){
+		if(strnicmpn(Player->Name, Name) == 0){
 			Result = Player;
 			break;
 		}
@@ -1838,7 +1838,7 @@ int IdentifyPlayer(const char *Name, bool ExactMatch, bool IgnoreGamemasters, TP
 	int Hits = 0;
 	for(int Index = 0; Index < FirstFreePlayer; Index += 1){
 		TPlayer *Player = *PlayerList.at(Index);
-		if(stricmp(Player->Name, Name, NameLength) == 0){
+		if(strnicmpn(Player->Name, Name, NameLength) == 0){
 			if(NameLength == (int)strlen(Player->Name)){
 				*OutPlayer = Player;
 				return 0; // FOUND ?
@@ -3070,7 +3070,7 @@ TPlayerIndexEntry *SearchPlayerIndex(const char *Name){
 	ASSERT(!Node->InternalNode);
 	TPlayerIndexLeafNode *Leaf = (TPlayerIndexLeafNode*)Node;
 	for(int i = 0; i < Leaf->Count; i += 1){
-		if(stricmp(Leaf->Entry[i].Name, Name) == 0){
+		if(strnicmpn(Leaf->Entry[i].Name, Name) == 0){
 			return &Leaf->Entry[i];
 		}
 	}

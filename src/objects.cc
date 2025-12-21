@@ -5,6 +5,16 @@
 
 #include <fstream>
 
+// Windows SAL annotations conflict with variable names IN/OUT
+#if OS_WINDOWS
+#ifdef IN
+#undef IN
+#endif
+#ifdef OUT
+#undef OUT
+#endif
+#endif
+
 static vector<TObjectType> ObjectTypes(0, 5000, 1000);
 static ObjectType SpecialObjects[49];
 static uint8 OldGroup[8192];
@@ -316,7 +326,7 @@ const char *ObjectType::getDescription(void){
 int GetFlagByName(const char *Name){
 	int Result = -1;
 	for(int i = 0; i < NARRAY(FlagNames); i += 1){
-		if(stricmp(FlagNames[i], Name) == 0){
+		if(strnicmpn(FlagNames[i], Name) == 0){
 			Result = i;
 			break;
 		}
@@ -327,7 +337,7 @@ int GetFlagByName(const char *Name){
 int GetTypeAttributeByName(const char *Name){
 	int Result = -1;
 	for(int i = 0; i < NARRAY(TypeAttributeNames); i += 1){
-		if(stricmp(TypeAttributeNames[i], Name) == 0){
+		if(strnicmpn(TypeAttributeNames[i], Name) == 0){
 			Result = i;
 			break;
 		}
@@ -338,7 +348,7 @@ int GetTypeAttributeByName(const char *Name){
 int GetInstanceAttributeByName(const char *Name){
 	int Result = -1;
 	for(int i = 0; i < NARRAY(InstanceAttributeNames); i += 1){
-		if(stricmp(InstanceAttributeNames[i], Name) == 0){
+		if(strnicmpn(InstanceAttributeNames[i], Name) == 0){
 			Result = i;
 			break;
 		}
@@ -430,7 +440,7 @@ ObjectType GetObjectTypeByName(const char *SearchName, bool Movable){
 		if(!Movable || !Type.getFlag(UNMOVE)){
 			const char *TypeName = Type.getName(-1);
 			if(TypeName && TypeName[0] != 0){
-				if(stricmp(SearchName, TypeName) == 0){
+				if(strnicmpn(SearchName, TypeName) == 0){
 					BestMatch = Type;
 					break;
 				}

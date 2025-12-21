@@ -6,7 +6,7 @@
 #include "operate.hh"
 #include "writer.hh"
 
-#include <dirent.h>
+#include "compat.hh"
 
 static vector<TNonplayer*> NonplayerList(0, 10000, 1000, NULL);
 static int FirstFreeNonplayer;

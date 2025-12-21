@@ -6,7 +6,7 @@
 #include "moveuse.hh"
 #include "reader.hh"
 
-#include <dirent.h>
+#include "compat.hh"
 
 static fifo<TStatement> Statements(1024);
 static fifo<TListener> Listeners(1024);

@@ -5,7 +5,17 @@
 #include "houses.hh"
 #include "script.hh"
 
-#include <dirent.h>
+#include "compat.hh"
+
+// Windows SAL annotations conflict with variable names IN/OUT
+#if OS_WINDOWS
+#ifdef IN
+#undef IN
+#endif
+#ifdef OUT
+#undef OUT
+#endif
+#endif
 
 int SectorXMin;
 int SectorXMax;
@@ -2508,7 +2518,7 @@ int GetDepotNumber(const char *Town){
 	for(int DepotNumber = DepotInfo.min;
 			DepotNumber <= DepotInfo.max;
 			DepotNumber += 1){
-		if(stricmp(DepotInfo.at(DepotNumber)->Town, Town) == 0){
+		if(strnicmpn(DepotInfo.at(DepotNumber)->Town, Town) == 0){
 			return DepotNumber;
 		}
 	}
@@ -2548,7 +2558,7 @@ bool GetMarkPosition(const char *Name, int *x, int *y, int *z){
 	bool Result = false;
 	for(int i = 0; i < Marks; i += 1){
 		TMark *MarkPointer = Mark.at(i);
-		if(stricmp(MarkPointer->Name, Name) == 0){
+		if(strnicmpn(MarkPointer->Name, Name) == 0){
 			*x = MarkPointer->x;
 			*y = MarkPointer->y;
 			*z = MarkPointer->z;

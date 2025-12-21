@@ -8,6 +8,16 @@
 #include <fstream>
 #include <sstream>
 
+// Windows SAL annotations conflict with variable names IN/OUT
+#if OS_WINDOWS
+#ifdef IN
+#undef IN
+#endif
+#ifdef OUT
+#undef OUT
+#endif
+#endif
+
 struct TSpellList {
 	uint8 Syllable[MAX_SPELL_SYLLABLES];
 	uint8 RuneGr;
@@ -1435,28 +1445,28 @@ void Teleport(TCreature *Actor, const char *Param){
 	uint16 HouseID = 0xFFFF; // NOTE(fusion): See `SearchFreeField`.
 	int MDGoStrength = Actor->Skills[SKILL_GO_STRENGTH]->MDAct;
 
-	if(stricmp(Param, "up") == 0){
+	if(strnicmpn(Param, "up") == 0){
 		if(!CheckRight(Actor->ID, TELEPORT_VERTICAL)){
 			return;
 		}
 		DestZ -= 1;
-	}else if(stricmp(Param, "down") == 0){
+	}else if(strnicmpn(Param, "down") == 0){
 		if(!CheckRight(Actor->ID, TELEPORT_VERTICAL)){
 			return;
 		}
 		DestZ += 1;
-	}else if(stricmp(Param, "fast") == 0){
+	}else if(strnicmpn(Param, "fast") == 0){
 		if(!CheckRight(Actor->ID, MODIFY_GOSTRENGTH)){
 			return;
 		}
 		MDGoStrength = 100;
-	}else if(stricmp(Param, "fastest") == 0){
+	}else if(strnicmpn(Param, "fastest") == 0){
 		if(!CheckRight(Actor->ID, MODIFY_GOSTRENGTH)){
 			return;
 		}
 		MDGoStrength = 200;
-	}else if(stricmp(Param, "slow") == 0
-			|| stricmp(Param, "normal") == 0){
+	}else if(strnicmpn(Param, "slow") == 0
+			|| strnicmpn(Param, "normal") == 0){
 		if(!CheckRight(Actor->ID, MODIFY_GOSTRENGTH)){
 			return;
 		}
@@ -1664,13 +1674,13 @@ void MagicClimbing(TCreature *Actor, int ManaPoints, int SoulPoints, const char 
 		case DIRECTION_WEST:	DestX -= 1; break;
 	}
 
-	if(stricmp(Param, "up") == 0){
+	if(strnicmpn(Param, "up") == 0){
 		if(OrigZ > 0 && !CoordinateFlag(OrigX, OrigY, OrigZ - 1, BANK)
 				&& !CoordinateFlag(OrigX, OrigY, OrigZ - 1, UNPASS)
 				&& Actor->MovePossible(DestX, DestY, OrigZ - 1, true, true)){
 			DestZ -= 1;
 		}
-	}else if(stricmp(Param, "down") == 0){
+	}else if(strnicmpn(Param, "down") == 0){
 		if(OrigZ < 15 && !CoordinateFlag(DestX, DestY, OrigZ, BANK)
 				&& !CoordinateFlag(DestX, DestY, OrigZ, UNPASS)
 				&& Actor->MovePossible(DestX, DestY, OrigZ + 1, true, true)){
@@ -2889,25 +2899,25 @@ void ChangeProfession(TCreature *Actor, const char *Param){
 		return;
 	}
 
-	if(stricmp(Param, "male") == 0){
+	if(strnicmpn(Param, "male") == 0){
 		Actor->Sex = 1;
-	}else if(stricmp(Param, "female") == 0){
+	}else if(strnicmpn(Param, "female") == 0){
 		Actor->Sex = 2;
-	}else if(stricmp(Param, "none") == 0){
+	}else if(strnicmpn(Param, "none") == 0){
 		((TPlayer*)Actor)->ClearProfession();
-	}else if(stricmp(Param, "knight") == 0){
+	}else if(strnicmpn(Param, "knight") == 0){
 		((TPlayer*)Actor)->ClearProfession();
 		((TPlayer*)Actor)->SetProfession(PROFESSION_KNIGHT);
-	}else if(stricmp(Param, "paladin") == 0){
+	}else if(strnicmpn(Param, "paladin") == 0){
 		((TPlayer*)Actor)->ClearProfession();
 		((TPlayer*)Actor)->SetProfession(PROFESSION_PALADIN);
-	}else if(stricmp(Param, "sorcerer") == 0){
+	}else if(strnicmpn(Param, "sorcerer") == 0){
 		((TPlayer*)Actor)->ClearProfession();
 		((TPlayer*)Actor)->SetProfession(PROFESSION_SORCERER);
-	}else if(stricmp(Param, "druid") == 0){
+	}else if(strnicmpn(Param, "druid") == 0){
 		((TPlayer*)Actor)->ClearProfession();
 		((TPlayer*)Actor)->SetProfession(PROFESSION_DRUID);
-	}else if(stricmp(Param, "promotion") == 0){
+	}else if(strnicmpn(Param, "promotion") == 0){
 		// TODO(fusion): Probably some inlined function to check whether the
 		// player is already promoted.
 		uint8 RealProfession = ((TPlayer*)Actor)->GetRealProfession();
@@ -3708,7 +3718,7 @@ static int TypeOfSpell(const char *Text){
 		for(int SyllableNr = 1;
 				SyllableNr < 6;
 				SyllableNr += 1){
-			if(stricmp(Text, SpellSyllable[SyllableNr], 2) == 0){
+			if(strnicmpn(Text, SpellSyllable[SyllableNr], 2) == 0){
 				SpellType = SyllableNr;
 				break;
 			}
@@ -3957,7 +3967,7 @@ int CheckForSpell(uint32 CreatureID, const char *Text){
 		for(int SyllableNr = 0;
 				SyllableNr < NARRAY(SpellSyllable);
 				SyllableNr += 1){
-			if(stricmp(SpellStr[Index], SpellSyllable[SyllableNr]) == 0){
+			if(strnicmpn(SpellStr[Index], SpellSyllable[SyllableNr]) == 0){
 				Syllable[Index] = (uint8)SyllableNr;
 				break;
 			}

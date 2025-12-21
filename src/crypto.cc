@@ -3,6 +3,11 @@
 #include <openssl/err.h>
 #include <openssl/pem.h>
 
+#if OS_WINDOWS
+// Required for OpenSSL to work with MSVC runtime FILE* operations
+#include <openssl/applink.c>
+#endif
+
 static void DumpOpenSSLErrors(const char *Where, const char *What){
 	error("OpenSSL error(s) while executing %s at %s:\n", What, Where);
 	ERR_print_errors_cb(

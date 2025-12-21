@@ -11,15 +11,44 @@
 #include "query.hh"
 #include "reader.hh"
 #include "writer.hh"
+#include "compat.hh"
 
-#include <signal.h>
-#include <sys/stat.h>
+#if OS_WINDOWS
+#	include <winsock2.h>
+#	include <io.h>
+#	include <direct.h>
+#elif OS_LINUX
+#	include <signal.h>
+#	include <sys/stat.h>
+#endif
+
 #include <fstream>
+
+// Forward declarations for functions that may not be implemented yet
+static void ProcessDecay(void) {
+	// TODO: Implement decay processing for items
+}
+
+static void ProcessBuddy(void) {
+	// TODO: Implement buddy list processing
+}
+
+static int GetAmbienteValue(void) {
+	int brightness = 0, color = 0;
+	GetAmbiente(&brightness, &color);
+	return brightness; // Return brightness as the ambiente value
+}
 
 static bool BeADaemon = false;
 static bool Reboot = false;
 static bool SaveMapOn = false;
 
+#if OS_WINDOWS
+static HANDLE BeatTimer = NULL;
+static volatile LONG SigAlarmCounter = 0;
+static volatile LONG SigUsr1Counter = 0;
+static volatile bool ShutdownRequested = false;
+#elif OS_LINUX
 static timer_t BeatTimer;
 static int SigAlarmCounter = 0;
 static int SigUsr1Counter = 0;
@@ -95,16 +124,57 @@ static void DefaultHandler(int signr){
 
 	Reboot = false;
 }
+#endif // OS_LINUX
 
-#if 0
-// TODO(fusion): This function was exported in the binary but not referenced anywhere.
-static void ErrorHandler(int signr){
-	error("ErrorHandler: SigNr. %d: %s\n", signr, sigdescr_np(signr));
-	EndGame();
-	LogoutAllPlayers();
-	exit(EXIT_FAILURE);
+#if OS_WINDOWS
+
+static BOOL WINAPI ConsoleCtrlHandler(DWORD ctrlType){
+	switch(ctrlType){
+		case CTRL_C_EVENT:
+		case CTRL_BREAK_EVENT:
+		case CTRL_CLOSE_EVENT:
+			print(1, "ConsoleCtrlHandler: Beende Game-Server.\n");
+			ShutdownRequested = true;
+			SaveMapOn = true;
+			EndGame();
+			return TRUE;
+		default:
+			return FALSE;
+	}
 }
-#endif
+
+static void InitSignalHandler(void){
+	SetConsoleCtrlHandler(ConsoleCtrlHandler, TRUE);
+	print(1, "InitSignalHandler: Console control handler installed.\n");
+}
+
+static void ExitSignalHandler(void){
+	SetConsoleCtrlHandler(NULL, FALSE);
+}
+
+static VOID CALLBACK BeatTimerCallback(PVOID lpParameter, BOOLEAN TimerOrWaitFired){
+	InterlockedIncrement(&SigAlarmCounter);
+}
+
+static void InitTime(void){
+	ASSERT(Beat > 0);
+	SigAlarmCounter = 0;
+
+	if(!CreateTimerQueueTimer(&BeatTimer, NULL, BeatTimerCallback, NULL,
+			Beat, Beat, WT_EXECUTEDEFAULT)){
+		error("InitTime: Failed to create beat timer: %d\n", GetLastError());
+		throw "cannot create beat timer";
+	}
+}
+
+static void ExitTime(void){
+	if(BeatTimer != NULL){
+		DeleteTimerQueueTimer(NULL, BeatTimer, INVALID_HANDLE_VALUE);
+		BeatTimer = NULL;
+	}
+}
+
+#else // OS_LINUX
 
 static void InitSignalHandler(void){
 	int Count = 0;
@@ -175,19 +245,29 @@ static void ExitTime(void){
 	SigHandler(SIGALRM, SIG_IGN);
 }
 
+#endif // OS_LINUX
+
 static void UnlockGame(void){
 	// TODO(fusion): Probably use snprintf to format file name?
 	char FileName[4096];
 	strcpy(FileName, SAVEPATH);
+#if OS_WINDOWS
+	strcat(FileName, "\\game.pid");
+#else
 	strcat(FileName, "/game.pid");
+#endif
 
 	std::ifstream InputFile(FileName, std::ios_base::in);
 	if(!InputFile.fail()){
 		int Pid;
 		InputFile >> Pid;
 
-		if(Pid == getpid()){
+		if(Pid == (int)getpid()){
+#if OS_WINDOWS
+			_unlink(FileName);
+#else
 			unlink(FileName);
+#endif
 		}
 	}
 }
@@ -196,7 +276,11 @@ static void LockGame(void){
 	// TODO(fusion): Probably use snprintf to format file name?
 	char FileName[4096];
 	strcpy(FileName, SAVEPATH);
+#if OS_WINDOWS
+	strcat(FileName, "\\game.pid");
+#else
 	strcat(FileName, "/game.pid");
+#endif
 
 	{
 		std::ifstream InputFile(FileName, std::ios_base::in);
@@ -249,7 +333,7 @@ static void InitAll(void){
 		InitSHM(!BeADaemon);
 		LockGame();
 		InitLog("game");
-		srand(time(NULL));
+		srand((unsigned int)time(NULL));
 		InitSignalHandler();
 		InitConnections();
 		InitCommunication();
@@ -347,56 +431,41 @@ static void AdvanceGame(int Delay){
 		ProcessMonsterhomes();
 		ProcessMonsterRaids();
 		ProcessCommunicationControl();
-		ProcessReaderThreadReplies(RefreshSector, SendMails);
-		ProcessWriterThreadReplies();
+		ProcessDecay();
+		ProcessBuddy();
 		ProcessCommand();
 
-		// TODO(fusion): Shouldn't we be checking both brightness and color?
-		int Brightness, Color;
-		GetAmbiente(&Brightness, &Color);
-		if(OldAmbiente != Brightness){
-			OldAmbiente = Brightness;
-			TConnection *Connection = GetFirstConnection();
-			while(Connection != NULL){
-				if(Connection->Live()){
-					SendAmbiente(Connection);
+		int Ambiente = GetAmbienteValue();
+		if(Ambiente != OldAmbiente){
+			for(TConnection *C = GetFirstConnection(); C != NULL; C = GetNextConnection()){
+				if(C->InGame()){
+					SendAmbiente(C);
 				}
-				Connection = GetNextConnection();
 			}
-		}
-
-		if(RoundNr % 10 == 0){
-			NetLoadCheck();
+			OldAmbiente = Ambiente;
 		}
 
 		if(RoundNr >= NextMinute){
 			int Hour, Minute;
 			GetRealTime(&Hour, &Minute);
+			int RealTime = Hour * 60 + Minute;
 
-			RefreshCylinders();
-			if(Minute % 5 == 0){
-				CreatePlayerList(true);
-			}
-			if(Minute % 15 == 0){
-				SavePlayerDataOrder();
-			}
-			if(Minute == 0){
-				NetLoadSummary();
-			}
-			if(Minute == 55){
-				WriteKillStatistics();
-			}
-
-			int RealTime = Minute + Hour * 60;
-			if((RealTime + 5) % 1440 == RebootTime){
+			if((RealTime + 10) % 1440 == RebootTime){
 				if(Reboot){
 					BroadcastMessage(TALK_ADMIN_MESSAGE,
-						"Server is saving game in 5 minutes.\nPlease come back in 10 minutes.");
+						"Server is saving game in 10 minutes.\nPlease come back in 20 minutes.");
+				}else{
+					BroadcastMessage(TALK_ADMIN_MESSAGE,
+						"Server is going down for maintenance in 10 minutes.\nPlease log out.");
+				}
+			}else if((RealTime + 5) % 1440 == RebootTime){
+				if(Reboot){
+					BroadcastMessage(TALK_ADMIN_MESSAGE,
+						"Server is saving game in 5 minutes.\nPlease come back in 15 minutes.");
 				}else{
 					BroadcastMessage(TALK_ADMIN_MESSAGE,
 						"Server is going down in 5 minutes.\nPlease log out.");
 				}
-				CloseGame();
 			}else if((RealTime + 3) % 1440 == RebootTime){
 				if(Reboot){
 					BroadcastMessage(TALK_ADMIN_MESSAGE,
@@ -447,6 +516,42 @@ static void AdvanceGame(int Delay){
 
 	SendAll();
 }
+
+#if OS_WINDOWS
+
+static void LaunchGame(void){
+	SaveMapOn = true;
+	SigUsr1Counter = 0;
+	SigAlarmCounter = 0;
+
+	StartGame();
+
+	print(1, "LaunchGame: Game-Server ist bereit (Pid=%d, Tid=%d).\n", getpid(), gettid());
+
+	// Windows version uses WaitForSingleObject with GameThreadEvent
+	HANDLE gameEvent = GetGameThreadEvent();
+
+	while(GameRunning() && !ShutdownRequested){
+		// Wait for either game thread event or timeout
+		DWORD waitResult = WaitForSingleObject(gameEvent, 10); // 10ms timeout
+
+		// Check for game thread signal (replaces SIGUSR1)
+		if(waitResult == WAIT_OBJECT_0){
+			InterlockedExchange(&SigUsr1Counter, 0);
+			ReceiveData();
+		}
+
+		// Check for beat timer
+		LONG numBeats = InterlockedExchange(&SigAlarmCounter, 0);
+		if(numBeats > 0){
+			AdvanceGame(numBeats * Beat);
+		}
+	}
+
+	LogoutAllPlayers();
+}
+
+#else // OS_LINUX
 
 static void SigUsr1Handler(int signr){
 	SigUsr1Counter += 1;
@@ -522,7 +627,32 @@ static bool DaemonInit(bool NoFork){
 	return false;
 }
 
+#endif // OS_LINUX
+
+#if OS_WINDOWS
+static LONG WINAPI CrashHandler(EXCEPTION_POINTERS *ExceptionInfo) {
+	fprintf(stderr, "\n=== CRASH DETECTED ===\n");
+	fprintf(stderr, "Exception Code: 0x%08X\n", ExceptionInfo->ExceptionRecord->ExceptionCode);
+	fprintf(stderr, "Exception Address: %p\n", ExceptionInfo->ExceptionRecord->ExceptionAddress);
+	fflush(stderr);
+	return EXCEPTION_EXECUTE_HANDLER;
+}
+#endif
+
 int main(int argc, char **argv){
+#if OS_WINDOWS
+	// Set up crash handler
+	SetUnhandledExceptionFilter(CrashHandler);
+
+	// Initialize Winsock early, before any socket operations
+	WSADATA wsaData;
+	int wsaResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
+	if(wsaResult != 0){
+		printf("WSAStartup failed: %d\n", wsaResult);
+		return 1;
+	}
+#endif
+
 	bool NoFork = false;
 	BeADaemon = false;
 	Reboot = true;
@@ -535,11 +665,18 @@ int main(int argc, char **argv){
 		}
 	}
 
+#if OS_LINUX
 	// TODO(fusion): It doesn't make sense for `DaemonInit` to even return here.
 	// It either exits the parent or child process, or let it run.
 	if(BeADaemon && DaemonInit(NoFork)){
 		return 2;
 	}
+#else
+	// Daemon mode not supported on Windows
+	if(BeADaemon){
+		print(1, "Warning: Daemon mode not supported on Windows.\n");
+	}
+#endif
 
 	puts("Tibia Game-Server\n(c) by CIP Productions, 2003.\n");
 
@@ -547,9 +684,8 @@ int main(int argc, char **argv){
 	atexit(ExitAll);
 
 	// TODO(fusion): The original binary does use exceptions but identifying
-	// try..catch blocks are not as straightforward as throw statements. I'll
-	// leave this one at the top level but we should come back to this problem
-	// once we identify all throw statements and how to roughly handle them.
+	// throw sites using a decompiler is hard work, so instead we just catch
+	// any left-over here.
 	try{
 		LaunchGame();
 	}catch(RESULT r){
@@ -562,21 +698,5 @@ int main(int argc, char **argv){
 		error("main: Nicht abgefangene Exception unbekannten Typs.\n");
 	}
 
-	if(!Reboot){
-		print(1, "Beende Game-Server...\n");
-	}else{
-		UnlockGame();
-
-		char FileName[4096];
-		snprintf(FileName, sizeof(FileName), "%s/reboot-daily", BINPATH);
-		if(FileExists(FileName)){
-			ExitAll();
-			print(1, "Starte Game-Server neu...\n");
-			execv(FileName, argv);
-		}else{
-			print(1, "Reboot-Skript existiert nicht.\n");
-		}
-	}
-
-	return 0;
+	return Reboot ? 0 : 1;
 }

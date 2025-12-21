@@ -4,9 +4,19 @@
 #include "threads.hh"
 #include "writer.hh"
 
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <signal.h>
+#if OS_WINDOWS
+#	ifndef WIN32_LEAN_AND_MEAN
+#		define WIN32_LEAN_AND_MEAN
+#	endif
+#	include <winsock2.h>
+#	include <ws2tcpip.h>
+#	pragma comment(lib, "ws2_32.lib")
+	typedef int socklen_t;
+#elif OS_LINUX
+#	include <arpa/inet.h>
+#	include <netinet/in.h>
+#	include <signal.h>
+#endif
 
 static Semaphore ConnectionMutex(1);
 static int ConnectionIterator;
@@ -94,6 +104,37 @@ bool TConnection::SetLoginTimer(int Timeout){
 		return false;
 	}
 
+#if OS_WINDOWS
+	if(this->LoginTimerHandle != NULL){
+		error("TConnection::SetLoginTimer: Timer already set.\n");
+		return false;
+	}
+
+	// Create a waitable timer
+	this->LoginTimerHandle = CreateWaitableTimerA(NULL, TRUE, NULL);
+	if(this->LoginTimerHandle == NULL){
+		error("TConnection::SetLoginTimer: Failed to create timer: %d\n", GetLastError());
+		return false;
+	}
+
+	// Set timer for Timeout seconds
+	LARGE_INTEGER dueTime;
+	dueTime.QuadPart = -((LONGLONG)Timeout * 10000000LL); // Negative = relative time in 100ns units
+
+	if(!SetWaitableTimer(this->LoginTimerHandle, &dueTime, 0, NULL, NULL, FALSE)){
+		error("TConnection::SetLoginTimer: Failed to start timer: %d\n", GetLastError());
+		CloseHandle(this->LoginTimerHandle);
+		this->LoginTimerHandle = NULL;
+		return false;
+	}
+
+	// Start a thread to wait for the timer and signal the TimerEvent
+	if(this->TimerEvent != NULL){
+		// Timer monitoring will be done in the main communication loop via WaitForMultipleObjects
+	}
+
+	return true;
+#else
 	if(this->LoginTimer != 0){
 		error("TConnection::SetLoginTimer: Timer already set.\n");
 		return false;
@@ -118,6 +159,7 @@ bool TConnection::SetLoginTimer(int Timeout){
 	}
 
 	return true;
+#endif
 }
 
 void TConnection::StopLoginTimer(void){
@@ -126,6 +168,16 @@ void TConnection::StopLoginTimer(void){
 		return;
 	}
 
+#if OS_WINDOWS
+	if(this->LoginTimerHandle == NULL){
+		error("TConnection::StopLoginTimer: Timer not set.\n");
+		return;
+	}
+
+	CancelWaitableTimer(this->LoginTimerHandle);
+	CloseHandle(this->LoginTimerHandle);
+	this->LoginTimerHandle = NULL;
+#else
 	if(this->LoginTimer == 0){
 		error("TConnection::StopLoginTimer: Timer not set.\n");
 		return;
@@ -137,6 +189,7 @@ void TConnection::StopLoginTimer(void){
 	}
 
 	this->LoginTimer = 0;
+#endif
 }
 
 int TConnection::GetSocket(void){
@@ -168,10 +221,21 @@ void TConnection::Assign(void){
 
 	this->State = CONNECTION_ASSIGNED;
 	this->ThreadID = gettid();
+#if OS_WINDOWS
+	this->LoginTimerHandle = NULL;
+	this->CloseEvent = NULL;
+	this->SendEvent = NULL;
+	this->TimerEvent = NULL;
+#else
 	this->LoginTimer = 0;
+#endif
 }
 
+#if OS_WINDOWS
+void TConnection::Connect(SOCKET Socket){
+#else
 void TConnection::Connect(int Socket){
+#endif
 	if(this->State != CONNECTION_ASSIGNED){
 		error("TConnection::Connect: Verbindung ist keinem Thread zugewiesen.\n");
 	}
@@ -316,7 +380,13 @@ void TConnection::Disconnect(void){
 	this->ClearKnownCreatureTable(true);
 	this->ConnectionIsOk = false;
 	this->State = CONNECTION_DISCONNECTED;
+#if OS_WINDOWS
+	if(this->CloseEvent != NULL){
+		SetEvent(this->CloseEvent);
+	}
+#else
 	tgkill(GetGameProcessID(), this->ThreadID, SIGHUP);
+#endif
 }
 
 TPlayer *TConnection::GetPlayer(void){

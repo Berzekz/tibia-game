@@ -5,6 +5,17 @@
 #include "query.hh"
 #include "threads.hh"
 
+#if OS_WINDOWS
+// pthread_cancel doesn't exist on Windows - use TerminateThread as fallback
+// Note: TerminateThread is unsafe, but this is only used for abort scenarios
+inline int pthread_cancel(ThreadHandle thread) {
+	if (thread != NULL) {
+		TerminateThread(thread, 0);
+	}
+	return 0;
+}
+#endif
+
 static ThreadHandle ProtocolThread;
 static ThreadHandle WriterThread;
 
